@@ -1,0 +1,1 @@
+Stage 01 script generation is covered by tests/test_script_generation.py.
