@@ -4,13 +4,14 @@ import argparse
 import json
 from pathlib import Path
 
-from pipeline.content_pipeline import ContentPipeline, GitHubModelsClient, WikipediaResearchBackend
+from pipeline.content_pipeline import ContentPipeline, GitHubModelsClient
 from pipeline.context import RunContext
 from pipeline.orchestrator import Orchestrator
+from pipeline.research import ResilientWikipediaResearchBackend
 
 
 def stage_content(context: RunContext) -> None:
-    pipeline = ContentPipeline(GitHubModelsClient(), WikipediaResearchBackend())
+    pipeline = ContentPipeline(GitHubModelsClient(), ResilientWikipediaResearchBackend())
     artifacts = pipeline.run(context.topic)
     for name, payload in artifacts.items():
         (context.run_dir / f"{name}.json").write_text(
