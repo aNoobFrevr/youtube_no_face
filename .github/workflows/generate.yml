@@ -3,8 +3,6 @@ name: Generate short
 on:
   pull_request:
     branches: [main]
-  push:
-    branches: [agent/bootstrap-actions]
   workflow_dispatch:
     inputs:
       topic:
@@ -16,18 +14,24 @@ on:
         required: false
         default: "1"
         type: string
+      model:
+        description: GitHub Models catalog ID
+        required: false
+        default: "openai/gpt-4.1"
+        type: string
 
 permissions:
   contents: read
+  models: read
 
 concurrency:
   group: faceless-pipeline-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  test-and-smoke:
+  test-and-generate:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -38,29 +42,30 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Run tests
+      - name: Run deterministic tests
         run: python -m unittest discover -s tests -v
 
-      - name: Run bootstrap pipeline
+      - name: Run researched content pipeline
+        if: github.event_name == 'workflow_dispatch'
         id: pipeline
         shell: bash
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_MODELS_MODEL: ${{ inputs.model }}
           INPUT_TOPIC: ${{ inputs.topic }}
           INPUT_FROM_STAGE: ${{ inputs.from_stage }}
         run: |
           set -euo pipefail
-          TOPIC="${INPUT_TOPIC:-Bootstrap smoke test}"
-          FROM_STAGE="${INPUT_FROM_STAGE:-1}"
           OUTPUT="$(python -m pipeline.run \
-            --topic "$TOPIC" \
-            --from-stage "$FROM_STAGE")"
+            --topic "$INPUT_TOPIC" \
+            --from-stage "${INPUT_FROM_STAGE:-1}")"
           printf '%s\n' "$OUTPUT"
           RUN_ID="$(printf '%s\n' "$OUTPUT" | sed -n 's/^RUN_ID=//p' | tail -n 1)"
           test -n "$RUN_ID"
           echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
 
       - name: Upload run artifact
-        if: always()
+        if: always() && github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: short-${{ steps.pipeline.outputs.run_id || github.run_id }}
