@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -56,7 +57,7 @@ class ResilientWikipediaResearchBackend:
         request = urllib.request.Request(
             f"{self.api}?{query}",
             headers={
-                "User-Agent": "youtube-no-face/0.2 (https://github.com/aNoobFrevr/youtube_no_face)",
+                "User-Agent": "youtube-no-face/0.3 (https://github.com/aNoobFrevr/youtube_no_face)",
                 "Accept": "application/json",
             },
         )
@@ -75,14 +76,13 @@ class ResilientWikipediaResearchBackend:
 
         raise RuntimeError("Wikipedia request retry loop exited unexpectedly")
 
-    def search(self, query: str, limit: int = 3) -> list[dict[str, str]]:
-        bounded_limit = min(limit, self.max_results_per_query)
+    def _search_once(self, query: str, limit: int) -> list[dict[str, str]]:
         payload = self._get_json(
             {
                 "action": "query",
                 "list": "search",
                 "srsearch": query,
-                "srlimit": bounded_limit,
+                "srlimit": limit,
                 "srprop": "snippet",
                 "format": "json",
                 "utf8": 1,
@@ -94,10 +94,55 @@ class ResilientWikipediaResearchBackend:
                 "title": item["title"],
                 "url": "https://en.wikipedia.org/wiki/"
                 + urllib.parse.quote(item["title"].replace(" ", "_")),
-                "snippet": item.get("snippet", ""),
+                "snippet": re.sub(r"<[^>]+>", "", item.get("snippet", "")),
             }
             for item in payload["query"]["search"]
         ]
+
+    def _search_variants(self, query: str) -> list[str]:
+        lowered = query.casefold()
+        variants = [query]
+
+        # Natural-language example questions often search poorly on Wikipedia.
+        # Add encyclopaedic phrases that describe the underlying phenomenon,
+        # while still letting the later relevance gate reject weak matches.
+        if "gravity" in lowered and any(word in lowered for word in ("example", "examples", "places", "locations")):
+            variants.extend(
+                [
+                    "gravity of Earth latitude equator poles altitude",
+                    "Earth gravity variation highest lowest locations",
+                    "gravity anomaly Earth regional variation",
+                ]
+            )
+        elif "gravity" in lowered and any(word in lowered for word in ("measure", "measurement", "instrument", "detect")):
+            variants.extend(["gravimetry gravimeter", "gravity of Earth measurement"])
+        elif "gravity" in lowered and any(word in lowered for word in ("cause", "causes", "variation", "different")):
+            variants.extend(["gravity of Earth variation latitude altitude", "Earth gravity field"])
+
+        deduplicated: list[str] = []
+        seen: set[str] = set()
+        for variant in variants:
+            normalized = " ".join(variant.split()).casefold()
+            if normalized not in seen:
+                seen.add(normalized)
+                deduplicated.append(variant)
+        return deduplicated
+
+    def search(self, query: str, limit: int = 3) -> list[dict[str, str]]:
+        bounded_limit = min(limit, self.max_results_per_query)
+        results: list[dict[str, str]] = []
+        seen_urls: set[str] = set()
+
+        for variant in self._search_variants(query):
+            for item in self._search_once(variant, bounded_limit):
+                if item["url"] in seen_urls:
+                    continue
+                seen_urls.add(item["url"])
+                results.append(item)
+                if len(results) >= bounded_limit:
+                    return results
+
+        return results
 
     def fetch(self, url: str) -> str:
         title = urllib.parse.unquote(url.rsplit("/", 1)[-1]).replace("_", " ")
