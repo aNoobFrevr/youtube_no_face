@@ -4,23 +4,32 @@ import argparse
 import json
 from pathlib import Path
 
+from pipeline.content_pipeline import ContentPipeline, GitHubModelsClient, WikipediaResearchBackend
 from pipeline.context import RunContext
 from pipeline.orchestrator import Orchestrator
-from pipeline.script import FakeScriptProvider, generate_script
 
 
-def stage_script(context: RunContext) -> None:
-    payload = generate_script(context.topic, FakeScriptProvider())
+def stage_content(context: RunContext) -> None:
+    pipeline = ContentPipeline(GitHubModelsClient(), WikipediaResearchBackend())
+    artifacts = pipeline.run(context.topic)
+    for name, payload in artifacts.items():
+        (context.run_dir / f"{name}.json").write_text(
+            json.dumps(payload, indent=2) + "\n", encoding="utf-8"
+        )
+    # Keep the historical filename for downstream compatibility.
     (context.run_dir / "script.json").write_text(
-        json.dumps(payload, indent=2) + "\n", encoding="utf-8"
+        json.dumps(artifacts["07_script"], indent=2) + "\n", encoding="utf-8"
     )
 
 
 def stage_render_manifest(context: RunContext) -> None:
+    validation = json.loads((context.run_dir / "08_validation.json").read_text(encoding="utf-8"))
     payload = {
         "run_id": context.run_id,
-        "mode": "bootstrap-smoke-test",
-        "message": "Rendering is intentionally deferred until its own red-green cycle.",
+        "mode": "content-ready",
+        "script": "script.json",
+        "sources": validation["source_urls"],
+        "message": "Rendering remains deferred until its own red-green cycle.",
     }
     (context.run_dir / "render.json").write_text(
         json.dumps(payload, indent=2) + "\n", encoding="utf-8"
@@ -30,7 +39,7 @@ def stage_render_manifest(context: RunContext) -> None:
 def build_orchestrator() -> Orchestrator:
     return Orchestrator(
         [
-            (1, "script", stage_script),
+            (1, "research-and-script", stage_content),
             (2, "render-manifest", stage_render_manifest),
         ]
     )
