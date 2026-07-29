@@ -4,9 +4,10 @@ import argparse
 import json
 from pathlib import Path
 
-from pipeline.content_pipeline import ContentPipeline, GitHubModelsClient
+from pipeline.content_pipeline import GitHubModelsClient
 from pipeline.context import RunContext
 from pipeline.orchestrator import Orchestrator
+from pipeline.quality_pipeline import ContentPipeline
 from pipeline.research import ResilientWikipediaResearchBackend
 
 
