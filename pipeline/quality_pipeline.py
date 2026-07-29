@@ -35,22 +35,32 @@ def _rank_candidates(
     *,
     include_text: bool,
 ) -> dict[str, dict[str, Any]]:
+    candidate_ids = [candidate["candidate_id"] for candidate in candidates]
     score_schema = _schema(
         {
-            "candidate_id": {"type": "string"},
+            "candidate_id": {"type": "string", "enum": candidate_ids},
             "score": {"type": "integer", "minimum": 0, "maximum": 100},
             "reason": {"type": "string"},
         },
         ["candidate_id", "score", "reason"],
     )
     schema = _schema(
-        {"rankings": {"type": "array", "minItems": 1, "items": score_schema}},
+        {
+            "rankings": {
+                "type": "array",
+                "minItems": len(candidates),
+                "maxItems": len(candidates),
+                "items": score_schema,
+            }
+        },
         ["rankings"],
     )
     instruction = (
-        "Score each Wikipedia candidate for whether it directly answers its assigned query. "
-        "Penalize tangential, fictional, ambiguous, generic, and wrong-domain pages. "
-        "A score of 65 or more means the page contains usable evidence for the query."
+        "Score every supplied Wikipedia candidate exactly once for whether it directly "
+        "answers its assigned query. Return one ranking for each candidate_id; do not omit "
+        "or duplicate IDs. Penalize tangential, fictional, ambiguous, generic, and "
+        "wrong-domain pages. A score of 65 or more means the page contains usable evidence "
+        "for the query."
     )
     if include_text:
         instruction += " Base the score primarily on the supplied article excerpt, not the title."
@@ -59,7 +69,18 @@ def _rank_candidates(
         json.dumps({"topic": topic, "candidates": candidates}),
         schema,
     )
-    return {item["candidate_id"]: item for item in result["rankings"]}
+    rankings = result["rankings"]
+    returned_ids = [item["candidate_id"] for item in rankings]
+    if len(set(returned_ids)) != len(returned_ids):
+        raise ValueError("candidate ranking returned duplicate candidate IDs")
+    missing = set(candidate_ids).difference(returned_ids)
+    unexpected = set(returned_ids).difference(candidate_ids)
+    if missing or unexpected:
+        raise ValueError(
+            f"candidate ranking IDs do not match input; missing={sorted(missing)}, "
+            f"unexpected={sorted(unexpected)}"
+        )
+    return {item["candidate_id"]: item for item in rankings}
 
 
 def retrieve_sources(
