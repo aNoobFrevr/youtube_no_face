@@ -2,7 +2,6 @@ import unittest
 
 from pipeline.content_pipeline import ContentPipeline, retrieve_sources, validate_final_script
 
-
 TOPIC = "Why is gravity different in different places"
 
 
@@ -35,56 +34,27 @@ class FakeJsonModel:
         if self.calls == 1:
             return {
                 "topic": TOPIC,
-                "queries": [
-                    "latitude gravity",
-                    "altitude gravity",
-                    "rotation gravity",
-                    "local gravity anomalies",
-                ],
+                "queries": ["latitude gravity", "altitude gravity", "rotation gravity", "local gravity anomalies"],
                 "required_concepts": ["latitude", "altitude", "rotation", "local geology"],
             }
         if self.calls == 2:
             return {
                 "rankings": [
-                    {"candidate_id": f"C{i}", "score": 95 if (i - 1) % 3 == 0 else 5, "reason": "direct match" if (i - 1) % 3 == 0 else "irrelevant"}
+                    {
+                        "candidate_id": f"C{i}",
+                        "score": 95 if (i - 1) % 3 == 0 else 5,
+                        "reason": "direct match" if (i - 1) % 3 == 0 else "irrelevant",
+                    }
                     for i in range(1, 13)
                 ]
             }
         if self.calls == 3:
             return {
                 "facts": [
-                    {
-                        "query_id": "Q1",
-                        "claim": "Effective gravity is lower near the equator than near the poles.",
-                        "evidence_excerpt": "Effective gravity is lower near the equator than near the poles.",
-                        "source_url": "https://science.test/latitude",
-                        "source_title": "Relevant latitude gravity",
-                        "confidence": "high",
-                    },
-                    {
-                        "query_id": "Q2",
-                        "claim": "Gravity decreases with altitude.",
-                        "evidence_excerpt": "Gravitational acceleration decreases as distance from Earth's centre increases.",
-                        "source_url": "https://science.test/altitude",
-                        "source_title": "Relevant altitude gravity",
-                        "confidence": "high",
-                    },
-                    {
-                        "query_id": "Q3",
-                        "claim": "Rotation reduces effective gravity most strongly near the equator.",
-                        "evidence_excerpt": "Earth's rotation creates a centrifugal effect strongest near the equator.",
-                        "source_url": "https://science.test/rotation",
-                        "source_title": "Relevant rotation gravity",
-                        "confidence": "high",
-                    },
-                    {
-                        "query_id": "Q4",
-                        "claim": "Dense underground structures create local gravity anomalies.",
-                        "evidence_excerpt": "Dense underground structures can produce small local gravity anomalies.",
-                        "source_url": "https://science.test/local",
-                        "source_title": "Relevant local gravity anomalies",
-                        "confidence": "medium",
-                    },
+                    {"query_id": "Q1", "claim": "Effective gravity is lower near the equator than near the poles.", "evidence_excerpt": "Effective gravity is lower near the equator than near the poles.", "source_url": "https://science.test/latitude", "source_title": "Relevant latitude gravity", "confidence": "high"},
+                    {"query_id": "Q2", "claim": "Gravity decreases with altitude.", "evidence_excerpt": "Gravitational acceleration decreases as distance from Earth's centre increases.", "source_url": "https://science.test/altitude", "source_title": "Relevant altitude gravity", "confidence": "high"},
+                    {"query_id": "Q3", "claim": "Rotation reduces effective gravity most strongly near the equator.", "evidence_excerpt": "Earth's rotation creates a centrifugal effect strongest near the equator.", "source_url": "https://science.test/rotation", "source_title": "Relevant rotation gravity", "confidence": "high"},
+                    {"query_id": "Q4", "claim": "Dense underground structures create local gravity anomalies.", "evidence_excerpt": "Dense underground structures can produce small local gravity anomalies.", "source_url": "https://science.test/local", "source_title": "Relevant local gravity anomalies", "confidence": "medium"},
                 ]
             }
         if self.calls == 4:
@@ -111,13 +81,13 @@ class FakeJsonModel:
             "topic": TOPIC,
             "hook": "You do not weigh exactly the same everywhere on Earth.",
             "segments": [
-                {"narration": "Effective gravity is lower near the equator than near the poles.", "visual_query": "equator poles gravity", "fact_ids": ["F1"]},
-                {"narration": "Gravity also decreases as you move farther from Earth's centre, so altitude matters.", "visual_query": "mountain Earth centre", "fact_ids": ["F2"]},
-                {"narration": "Rotation adds another effect. Its centrifugal influence is strongest near the equator.", "visual_query": "rotating Earth equator", "fact_ids": ["F3"]},
-                {"narration": "Dense underground structures can create small local gravity anomalies that geophysicists measure.", "visual_query": "underground density gravity map", "fact_ids": ["F4"]},
-                {"narration": "Together, latitude, altitude, rotation, and local geology make gravity vary slightly from place to place.", "visual_query": "global gravity variation", "fact_ids": ["F1", "F2", "F3", "F4"]},
+                {"narration": "Effective gravity is lower near the equator than near the poles because Earth is not perfectly spherical.", "visual_query": "equator poles gravity", "fact_ids": ["F1"]},
+                {"narration": "Gravity also decreases as you move farther from Earth's centre, so altitude matters even when the change is small.", "visual_query": "mountain Earth centre", "fact_ids": ["F2"]},
+                {"narration": "Rotation adds another effect. Its centrifugal influence is strongest near the equator and reduces effective gravity there.", "visual_query": "rotating Earth equator", "fact_ids": ["F3"]},
+                {"narration": "Dense underground structures can create small local gravity anomalies that geophysicists measure with sensitive instruments.", "visual_query": "underground density gravity map", "fact_ids": ["F4"]},
+                {"narration": "Together, latitude, altitude, rotation, and local geology make gravity vary slightly from place to place across the planet.", "visual_query": "global gravity variation", "fact_ids": ["F1", "F2", "F3", "F4"]},
             ],
-            "cta": "",
+            "cta": "These differences are small, but precise measurements can map them and reveal what lies beneath Earth's surface.",
         }
 
 
