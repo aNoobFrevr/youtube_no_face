@@ -1,0 +1,69 @@
+name: Generate short
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [agent/bootstrap-actions]
+  workflow_dispatch:
+    inputs:
+      topic:
+        description: Video topic
+        required: true
+        type: string
+      from_stage:
+        description: First stage to run
+        required: false
+        default: "1"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: faceless-pipeline-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test-and-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Run bootstrap pipeline
+        id: pipeline
+        shell: bash
+        env:
+          INPUT_TOPIC: ${{ inputs.topic }}
+          INPUT_FROM_STAGE: ${{ inputs.from_stage }}
+        run: |
+          set -euo pipefail
+          TOPIC="${INPUT_TOPIC:-Bootstrap smoke test}"
+          FROM_STAGE="${INPUT_FROM_STAGE:-1}"
+          OUTPUT="$(python -m pipeline.run \
+            --topic "$TOPIC" \
+            --from-stage "$FROM_STAGE")"
+          printf '%s\n' "$OUTPUT"
+          RUN_ID="$(printf '%s\n' "$OUTPUT" | sed -n 's/^RUN_ID=//p' | tail -n 1)"
+          test -n "$RUN_ID"
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Upload run artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: short-${{ steps.pipeline.outputs.run_id || github.run_id }}
+          path: runs/
+          if-no-files-found: warn
+          retention-days: 7
