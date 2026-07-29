@@ -17,7 +17,6 @@ def stage_content(context: RunContext) -> None:
         (context.run_dir / f"{name}.json").write_text(
             json.dumps(payload, indent=2) + "\n", encoding="utf-8"
         )
-    # Keep the historical filename for downstream compatibility.
     (context.run_dir / "script.json").write_text(
         json.dumps(artifacts["07_script"], indent=2) + "\n", encoding="utf-8"
     )
