@@ -13,11 +13,23 @@ class ResilientWikipediaResearchBackend:
 
     api = "https://en.wikipedia.org/w/api.php"
 
-    def __init__(self, max_attempts: int = 5, base_delay: float = 1.0):
+    def __init__(
+        self,
+        max_attempts: int = 5,
+        base_delay: float = 1.0,
+        max_results_per_query: int = 1,
+        max_document_chars: int = 3000,
+    ):
         if max_attempts < 1:
             raise ValueError("max_attempts must be at least 1")
+        if max_results_per_query < 1:
+            raise ValueError("max_results_per_query must be at least 1")
+        if max_document_chars < 500:
+            raise ValueError("max_document_chars must be at least 500")
         self.max_attempts = max_attempts
         self.base_delay = base_delay
+        self.max_results_per_query = max_results_per_query
+        self.max_document_chars = max_document_chars
         self._last_request_at = 0.0
 
     def _wait_for_rate_limit(self) -> None:
@@ -64,12 +76,13 @@ class ResilientWikipediaResearchBackend:
         raise RuntimeError("Wikipedia request retry loop exited unexpectedly")
 
     def search(self, query: str, limit: int = 3) -> list[dict[str, str]]:
+        bounded_limit = min(limit, self.max_results_per_query)
         payload = self._get_json(
             {
                 "action": "query",
                 "list": "search",
                 "srsearch": query,
-                "srlimit": limit,
+                "srlimit": bounded_limit,
                 "format": "json",
                 "utf8": 1,
                 "maxlag": 5,
@@ -98,4 +111,4 @@ class ResilientWikipediaResearchBackend:
             }
         )
         page = next(iter(payload["query"]["pages"].values()))
-        return page.get("extract", "")
+        return page.get("extract", "")[: self.max_document_chars]
