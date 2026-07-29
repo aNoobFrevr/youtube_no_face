@@ -103,9 +103,6 @@ class ResilientWikipediaResearchBackend:
         lowered = query.casefold()
         variants = [query]
 
-        # Natural-language example questions often search poorly on Wikipedia.
-        # Add encyclopaedic phrases that describe the underlying phenomenon,
-        # while still letting the later relevance gate reject weak matches.
         if "gravity" in lowered and any(word in lowered for word in ("example", "examples", "places", "locations")):
             variants.extend(
                 [
@@ -130,11 +127,17 @@ class ResilientWikipediaResearchBackend:
 
     def search(self, query: str, limit: int = 3) -> list[dict[str, str]]:
         bounded_limit = min(limit, self.max_results_per_query)
+        groups = [self._search_once(variant, bounded_limit) for variant in self._search_variants(query)]
         results: list[dict[str, str]] = []
         seen_urls: set[str] = set()
 
-        for variant in self._search_variants(query):
-            for item in self._search_once(variant, bounded_limit):
+        # Round-robin prevents a weak natural-language search from consuming all
+        # candidate slots before the encyclopaedic fallback searches are seen.
+        for rank in range(bounded_limit):
+            for group in groups:
+                if rank >= len(group):
+                    continue
+                item = group[rank]
                 if item["url"] in seen_urls:
                     continue
                 seen_urls.add(item["url"])
