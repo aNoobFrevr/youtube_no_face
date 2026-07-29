@@ -1,6 +1,10 @@
 name: Generate short
 
 on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [agent/bootstrap-actions]
   workflow_dispatch:
     inputs:
       topic:
@@ -17,7 +21,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: faceless-pipeline
+  group: faceless-pipeline-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -40,11 +44,16 @@ jobs:
       - name: Run bootstrap pipeline
         id: pipeline
         shell: bash
+        env:
+          INPUT_TOPIC: ${{ inputs.topic }}
+          INPUT_FROM_STAGE: ${{ inputs.from_stage }}
         run: |
           set -euo pipefail
+          TOPIC="${INPUT_TOPIC:-Bootstrap smoke test}"
+          FROM_STAGE="${INPUT_FROM_STAGE:-1}"
           OUTPUT="$(python -m pipeline.run \
-            --topic "${{ inputs.topic }}" \
-            --from-stage "${{ inputs.from_stage }}")"
+            --topic "$TOPIC" \
+            --from-stage "$FROM_STAGE")"
           printf '%s\n' "$OUTPUT"
           RUN_ID="$(printf '%s\n' "$OUTPUT" | sed -n 's/^RUN_ID=//p' | tail -n 1)"
           test -n "$RUN_ID"
