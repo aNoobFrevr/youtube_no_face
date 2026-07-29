@@ -6,15 +6,11 @@ from pathlib import Path
 
 from pipeline.context import RunContext
 from pipeline.orchestrator import Orchestrator
+from pipeline.script import FakeScriptProvider, generate_script
 
 
 def stage_script(context: RunContext) -> None:
-    payload = {
-        "topic": context.topic,
-        "hook": f"Here is what makes {context.topic} interesting.",
-        "segments": [],
-        "cta": "Follow for the full build.",
-    }
+    payload = generate_script(context.topic, FakeScriptProvider())
     (context.run_dir / "script.json").write_text(
         json.dumps(payload, indent=2) + "\n", encoding="utf-8"
     )
