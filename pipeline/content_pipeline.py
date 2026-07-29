@@ -12,21 +12,15 @@ from typing import Any, Protocol
 
 
 class JsonModel(Protocol):
-    def complete_json(self, system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]:
-        ...
+    def complete_json(self, system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]: ...
 
 
 class ResearchBackend(Protocol):
-    def search(self, query: str, limit: int = 3) -> list[dict[str, str]]:
-        ...
-
-    def fetch(self, url: str) -> str:
-        ...
+    def search(self, query: str, limit: int = 3) -> list[dict[str, str]]: ...
+    def fetch(self, url: str) -> str: ...
 
 
 class GitHubModelsClient:
-    """Small dependency-free client for GitHub Models structured output."""
-
     endpoint = "https://models.github.ai/inference/chat/completions"
 
     def __init__(self, token: str | None = None, model: str | None = None):
@@ -38,20 +32,10 @@ class GitHubModelsClient:
     def complete_json(self, system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]:
         body = {
             "model": self.model,
-            "temperature": 0.2,
+            "temperature": 0.1,
             "seed": 17,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "pipeline_result",
-                    "strict": True,
-                    "schema": schema,
-                },
-            },
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            "response_format": {"type": "json_schema", "json_schema": {"name": "pipeline_result", "strict": True, "schema": schema}},
         }
         request = urllib.request.Request(
             self.endpoint,
@@ -70,67 +54,11 @@ class GitHubModelsClient:
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"GitHub Models request failed: HTTP {exc.code}: {detail}") from exc
-        content = payload["choices"][0]["message"]["content"]
-        return json.loads(content)
-
-
-class WikipediaResearchBackend:
-    """Initial zero-key retrieval adapter. Replaceable without changing later stages."""
-
-    api = "https://en.wikipedia.org/w/api.php"
-
-    def search(self, query: str, limit: int = 3) -> list[dict[str, str]]:
-        params = urllib.parse.urlencode(
-            {
-                "action": "query",
-                "list": "search",
-                "srsearch": query,
-                "srlimit": limit,
-                "format": "json",
-                "utf8": 1,
-            }
-        )
-        request = urllib.request.Request(
-            f"{self.api}?{params}", headers={"User-Agent": "youtube-no-face/0.1"}
-        )
-        with urllib.request.urlopen(request, timeout=30) as response:
-            results = json.load(response)["query"]["search"]
-        return [
-            {
-                "title": item["title"],
-                "url": "https://en.wikipedia.org/wiki/" + urllib.parse.quote(item["title"].replace(" ", "_")),
-            }
-            for item in results
-        ]
-
-    def fetch(self, url: str) -> str:
-        title = urllib.parse.unquote(url.rsplit("/", 1)[-1]).replace("_", " ")
-        params = urllib.parse.urlencode(
-            {
-                "action": "query",
-                "prop": "extracts",
-                "explaintext": 1,
-                "redirects": 1,
-                "titles": title,
-                "format": "json",
-            }
-        )
-        request = urllib.request.Request(
-            f"{self.api}?{params}", headers={"User-Agent": "youtube-no-face/0.1"}
-        )
-        with urllib.request.urlopen(request, timeout=30) as response:
-            pages = json.load(response)["query"]["pages"]
-        page = next(iter(pages.values()))
-        return page.get("extract", "")
+        return json.loads(payload["choices"][0]["message"]["content"])
 
 
 def _schema(properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
-    return {
-        "type": "object",
-        "properties": properties,
-        "required": required,
-        "additionalProperties": False,
-    }
+    return {"type": "object", "properties": properties, "required": required, "additionalProperties": False}
 
 
 def validate_non_empty_list(payload: dict[str, Any], field: str) -> list[Any]:
@@ -145,76 +73,114 @@ def plan_queries(topic: str, model: JsonModel) -> dict[str, Any]:
         {
             "topic": {"type": "string"},
             "queries": {"type": "array", "minItems": 4, "maxItems": 8, "items": {"type": "string"}},
+            "required_concepts": {"type": "array", "minItems": 3, "maxItems": 10, "items": {"type": "string"}},
         },
-        ["topic", "queries"],
+        ["topic", "queries", "required_concepts"],
     )
     result = model.complete_json(
-        "Generate precise, non-overlapping research queries. Cover causes, mechanisms, measurements, examples, and misconceptions.",
+        "Generate precise, non-overlapping research queries and a compact list of concepts a correct explainer must cover. Include causes, mechanisms, measurement, concrete examples, scale, and misconceptions where relevant.",
         f"Topic: {topic}",
         schema,
     )
     validate_non_empty_list(result, "queries")
+    validate_non_empty_list(result, "required_concepts")
     return result
 
 
-def retrieve_sources(queries: dict[str, Any], backend: ResearchBackend, per_query: int = 2) -> dict[str, Any]:
-    seen: set[str] = set()
-    sources: list[dict[str, str]] = []
-    for query in queries["queries"]:
+def retrieve_sources(queries: dict[str, Any], backend: ResearchBackend, model: JsonModel, per_query: int = 3, threshold: int = 65) -> dict[str, Any]:
+    candidates: list[dict[str, Any]] = []
+    candidate_id = 1
+    for query_index, query in enumerate(queries["queries"], start=1):
         for result in backend.search(query, limit=per_query):
-            if result["url"] in seen:
-                continue
-            seen.add(result["url"])
-            sources.append({"query": query, **result})
-    if not sources:
-        raise ValueError("research returned no sources")
-    return {"topic": queries["topic"], "sources": sources}
+            candidates.append({"candidate_id": f"C{candidate_id}", "query_id": f"Q{query_index}", "query": query, **result})
+            candidate_id += 1
+    if not candidates:
+        raise ValueError("research returned no source candidates")
+
+    score_schema = _schema(
+        {
+            "candidate_id": {"type": "string"},
+            "score": {"type": "integer", "minimum": 0, "maximum": 100},
+            "reason": {"type": "string"},
+        },
+        ["candidate_id", "score", "reason"],
+    )
+    schema = _schema({"rankings": {"type": "array", "minItems": 1, "items": score_schema}}, ["rankings"])
+    ranking = model.complete_json(
+        "Score each candidate for direct semantic relevance to its assigned query. Penalize tangential, fictional, ambiguous, or wrong-domain pages. Do not reward a page merely because it shares a keyword.",
+        json.dumps({"topic": queries["topic"], "candidates": candidates}),
+        schema,
+    )
+    scores = {item["candidate_id"]: item for item in ranking["rankings"]}
+    selected: list[dict[str, Any]] = []
+    for query_index, query in enumerate(queries["queries"], start=1):
+        group = [c for c in candidates if c["query_id"] == f"Q{query_index}" and c["candidate_id"] in scores]
+        group.sort(key=lambda c: scores[c["candidate_id"]]["score"], reverse=True)
+        if not group or scores[group[0]["candidate_id"]]["score"] < threshold:
+            raise ValueError(f"no sufficiently relevant source for query: {query}")
+        best = group[0]
+        selected.append({
+            "query_id": best["query_id"], "query": query, "title": best["title"], "url": best["url"],
+            "relevance_score": scores[best["candidate_id"]]["score"],
+            "relevance_reason": scores[best["candidate_id"]]["reason"],
+        })
+    return {"topic": queries["topic"], "required_concepts": queries["required_concepts"], "sources": selected, "candidates_considered": len(candidates)}
 
 
-def clean_documents(sources: dict[str, Any], backend: ResearchBackend, max_chars: int = 12000) -> dict[str, Any]:
+def clean_documents(sources: dict[str, Any], backend: ResearchBackend, max_chars: int = 2400) -> dict[str, Any]:
     documents = []
     for source in sources["sources"]:
-        text = backend.fetch(source["url"])
-        text = html.unescape(text)
+        text = html.unescape(backend.fetch(source["url"]))
         text = re.sub(r"\s+", " ", text).strip()[:max_chars]
-        if len(text) < 200:
-            continue
-        documents.append({**source, "text": text})
-    if not documents:
-        raise ValueError("no usable source documents")
-    return {"topic": sources["topic"], "documents": documents}
+        if len(text) >= 200:
+            documents.append({**source, "text": text})
+    covered = {d["query_id"] for d in documents}
+    expected = {s["query_id"] for s in sources["sources"]}
+    if covered != expected:
+        raise ValueError(f"missing usable documents for queries: {sorted(expected - covered)}")
+    return {"topic": sources["topic"], "required_concepts": sources["required_concepts"], "documents": documents}
+
+
+def _normalise(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip().casefold()
 
 
 def extract_facts(documents: dict[str, Any], model: JsonModel) -> dict[str, Any]:
     fact_schema = _schema(
         {
+            "query_id": {"type": "string"},
             "claim": {"type": "string"},
-            "evidence": {"type": "string"},
+            "evidence_excerpt": {"type": "string"},
             "source_url": {"type": "string"},
             "source_title": {"type": "string"},
             "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
         },
-        ["claim", "evidence", "source_url", "source_title", "confidence"],
+        ["query_id", "claim", "evidence_excerpt", "source_url", "source_title", "confidence"],
     )
-    schema = _schema(
-        {"facts": {"type": "array", "minItems": 4, "maxItems": 20, "items": fact_schema}},
-        ["facts"],
-    )
-    compact = [
-        {"title": d["title"], "url": d["url"], "text": d["text"]}
-        for d in documents["documents"]
-    ]
+    schema = _schema({"facts": {"type": "array", "minItems": 4, "maxItems": 24, "items": fact_schema}}, ["facts"])
+    compact = [{"query_id": d["query_id"], "query": d["query"], "title": d["title"], "url": d["url"], "text": d["text"]} for d in documents["documents"]]
     result = model.complete_json(
-        "Extract only claims explicitly supported by the supplied documents. Evidence must be a short paraphrase, not an invented quotation. Preserve the exact source URL.",
-        json.dumps({"topic": documents["topic"], "documents": compact}),
+        "Extract only atomic claims directly entailed by the supplied text. Copy a short exact evidence excerpt from the source text. Never combine multiple mechanisms unless the excerpt supports all of them. Produce at least one fact for every query_id.",
+        json.dumps({"topic": documents["topic"], "required_concepts": documents["required_concepts"], "documents": compact}),
         schema,
     )
     validate_non_empty_list(result, "facts")
-    valid_urls = {d["url"] for d in documents["documents"]}
+    docs_by_url = {d["url"]: d for d in documents["documents"]}
+    expected_queries = {d["query_id"] for d in documents["documents"]}
+    covered_queries: set[str] = set()
     for fact in result["facts"]:
-        if fact["source_url"] not in valid_urls:
+        doc = docs_by_url.get(fact["source_url"])
+        if not doc:
             raise ValueError("fact cites a source that was not retrieved")
-    return {"topic": documents["topic"], **result}
+        if fact["query_id"] != doc["query_id"]:
+            raise ValueError("fact query_id does not match its source document")
+        excerpt = _normalise(fact["evidence_excerpt"])
+        if not excerpt or excerpt not in _normalise(doc["text"]):
+            raise ValueError("fact evidence excerpt is not present in its source document")
+        covered_queries.add(fact["query_id"])
+    if covered_queries != expected_queries:
+        raise ValueError(f"fact extraction missed queries: {sorted(expected_queries - covered_queries)}")
+    return {"topic": documents["topic"], "required_concepts": documents["required_concepts"], **result}
 
 
 def deduplicate_facts(facts: dict[str, Any], model: JsonModel) -> dict[str, Any]:
@@ -222,45 +188,41 @@ def deduplicate_facts(facts: dict[str, Any], model: JsonModel) -> dict[str, Any]
         {
             "id": {"type": "string"},
             "claim": {"type": "string"},
+            "query_ids": {"type": "array", "minItems": 1, "items": {"type": "string"}},
             "source_urls": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+            "evidence_excerpts": {"type": "array", "minItems": 1, "items": {"type": "string"}},
             "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
         },
-        ["id", "claim", "source_urls", "confidence"],
+        ["id", "claim", "query_ids", "source_urls", "evidence_excerpts", "confidence"],
     )
     schema = _schema(
-        {
-            "facts": {"type": "array", "minItems": 3, "maxItems": 12, "items": item_schema},
-            "conflicts": {"type": "array", "items": {"type": "string"}},
-        },
+        {"facts": {"type": "array", "minItems": 3, "maxItems": 16, "items": item_schema}, "conflicts": {"type": "array", "items": {"type": "string"}}},
         ["facts", "conflicts"],
     )
     result = model.complete_json(
-        "Merge equivalent facts, retain source provenance, and report genuine contradictions. Do not add new claims.",
+        "Merge only genuinely equivalent claims. Preserve every query_id, source URL, and exact evidence excerpt. Do not broaden, infer, or add claims. Report genuine contradictions.",
         json.dumps(facts),
         schema,
     )
     validate_non_empty_list(result, "facts")
-    return {"topic": facts["topic"], **result}
+    source_urls = {f["source_url"] for f in facts["facts"]}
+    query_ids = {f["query_id"] for f in facts["facts"]}
+    for item in result["facts"]:
+        if not set(item["source_urls"]).issubset(source_urls):
+            raise ValueError("deduplication introduced an unknown source")
+        if not set(item["query_ids"]).issubset(query_ids):
+            raise ValueError("deduplication introduced an unknown query")
+    return {"topic": facts["topic"], "required_concepts": facts["required_concepts"], **result}
 
 
 def plan_script(knowledge: dict[str, Any], model: JsonModel) -> dict[str, Any]:
     beat_schema = _schema(
-        {
-            "purpose": {"type": "string"},
-            "fact_ids": {"type": "array", "minItems": 1, "items": {"type": "string"}},
-            "visual_intent": {"type": "string"},
-        },
+        {"purpose": {"type": "string"}, "fact_ids": {"type": "array", "minItems": 1, "items": {"type": "string"}}, "visual_intent": {"type": "string"}},
         ["purpose", "fact_ids", "visual_intent"],
     )
-    schema = _schema(
-        {
-            "angle": {"type": "string"},
-            "beats": {"type": "array", "minItems": 4, "maxItems": 7, "items": beat_schema},
-        },
-        ["angle", "beats"],
-    )
+    schema = _schema({"angle": {"type": "string"}, "beats": {"type": "array", "minItems": 4, "maxItems": 8, "items": beat_schema}}, ["angle", "beats"])
     result = model.complete_json(
-        "Plan a clear 45-60 second explainer. Start with a concrete tension or counterintuitive fact. Use only supplied fact IDs. Include one example and a concise takeaway.",
+        "Plan a clear 45-60 second explainer using only supplied facts. Cover at least 80 percent of represented query_ids and all required concepts that the evidence supports. Include one quantitative or concrete example only when explicitly supported.",
         json.dumps(knowledge),
         schema,
     )
@@ -269,33 +231,24 @@ def plan_script(knowledge: dict[str, Any], model: JsonModel) -> dict[str, Any]:
 
 def write_script(knowledge: dict[str, Any], plan: dict[str, Any], model: JsonModel) -> dict[str, Any]:
     segment_schema = _schema(
-        {
-            "narration": {"type": "string"},
-            "visual_query": {"type": "string"},
-            "fact_ids": {"type": "array", "minItems": 1, "items": {"type": "string"}},
-        },
+        {"narration": {"type": "string"}, "visual_query": {"type": "string"}, "fact_ids": {"type": "array", "minItems": 1, "items": {"type": "string"}}},
         ["narration", "visual_query", "fact_ids"],
     )
     schema = _schema(
-        {
-            "topic": {"type": "string"},
-            "hook": {"type": "string"},
-            "segments": {"type": "array", "minItems": 4, "maxItems": 7, "items": segment_schema},
-            "cta": {"type": "string"},
-        },
+        {"topic": {"type": "string"}, "hook": {"type": "string"}, "segments": {"type": "array", "minItems": 4, "maxItems": 8, "items": segment_schema}, "cta": {"type": "string"}},
         ["topic", "hook", "segments", "cta"],
     )
-    result = model.complete_json(
-        "Write natural spoken English for a curious adult. Target 110-150 total spoken words. Use short varied sentences. Avoid 'the surprising reason', 'hidden secret', generic hype, repeated topic wording, and corporate prose. Every factual sentence must map to supplied fact IDs. CTA may be empty.",
+    return model.complete_json(
+        "Write natural spoken English for a curious adult in 110-150 words. Every factual clause must be no more specific than the cited fact claims. Never invent comparisons, locations, numbers, instruments, causes, or examples. Use short varied sentences and avoid generic hype. CTA may be empty.",
         json.dumps({"knowledge": knowledge, "plan": plan}),
         schema,
     )
-    return result
 
 
 def validate_final_script(script: dict[str, Any], knowledge: dict[str, Any]) -> dict[str, Any]:
     errors: list[str] = []
-    fact_ids = {fact["id"] for fact in knowledge["facts"]}
+    warnings: list[str] = []
+    facts_by_id = {fact["id"]: fact for fact in knowledge["facts"]}
     used_ids: set[str] = set()
     if script.get("topic", "").strip() != knowledge["topic"].strip():
         errors.append("script topic does not match requested topic")
@@ -304,7 +257,6 @@ def validate_final_script(script: dict[str, Any], knowledge: dict[str, Any]) -> 
         errors.append("segments must be non-empty")
         segments = []
     spoken = [script.get("hook", ""), script.get("cta", "")]
-    banned = ("the surprising reason", "hidden secret", "hidden engineering problem")
     for index, segment in enumerate(segments):
         narration = segment.get("narration", "")
         visual = segment.get("visual_query", "")
@@ -312,7 +264,7 @@ def validate_final_script(script: dict[str, Any], knowledge: dict[str, Any]) -> 
         spoken.append(narration)
         if not narration.strip() or not visual.strip():
             errors.append(f"segment {index} has empty narration or visual query")
-        unknown = set(ids).difference(fact_ids)
+        unknown = set(ids).difference(facts_by_id)
         if unknown:
             errors.append(f"segment {index} uses unknown fact IDs: {sorted(unknown)}")
         used_ids.update(ids)
@@ -320,18 +272,33 @@ def validate_final_script(script: dict[str, Any], knowledge: dict[str, Any]) -> 
     words = re.findall(r"\b[\w'-]+\b", text)
     if not 90 <= len(words) <= 170:
         errors.append(f"spoken word count {len(words)} is outside 90-170")
-    lowered = text.lower()
-    for phrase in banned:
-        if phrase in lowered:
+    for phrase in ("the surprising reason", "hidden secret", "hidden engineering problem"):
+        if phrase in text.lower():
             errors.append(f"banned generic phrase: {phrase}")
     if not used_ids:
         errors.append("script uses no researched facts")
+
+    all_query_ids = {qid for fact in facts_by_id.values() for qid in fact["query_ids"]}
+    used_query_ids = {qid for fid in used_ids if fid in facts_by_id for qid in facts_by_id[fid]["query_ids"]}
+    coverage = len(used_query_ids) / len(all_query_ids) if all_query_ids else 0.0
+    if coverage < 0.8:
+        errors.append(f"research-query coverage {coverage:.0%} is below 80%")
+
+    source_urls = sorted({url for fid in used_ids if fid in facts_by_id for url in facts_by_id[fid]["source_urls"]})
+    domains = sorted({urllib.parse.urlparse(url).netloc for url in source_urls})
+    if len(domains) < 2:
+        warnings.append("all cited evidence comes from one source domain; add an independent authoritative backend before production")
+
     return {
         "valid": not errors,
         "errors": errors,
+        "warnings": warnings,
         "word_count": len(words),
         "used_fact_ids": sorted(used_ids),
-        "source_urls": sorted({url for fact in knowledge["facts"] if fact["id"] in used_ids for url in fact["source_urls"]}),
+        "covered_query_ids": sorted(used_query_ids),
+        "query_coverage": round(coverage, 3),
+        "source_urls": source_urls,
+        "source_domains": domains,
     }
 
 
@@ -343,7 +310,7 @@ class ContentPipeline:
     def run(self, topic: str) -> dict[str, dict[str, Any]]:
         artifacts: dict[str, dict[str, Any]] = {}
         artifacts["01_queries"] = plan_queries(topic, self.model)
-        artifacts["02_sources"] = retrieve_sources(artifacts["01_queries"], self.research)
+        artifacts["02_sources"] = retrieve_sources(artifacts["01_queries"], self.research, self.model)
         artifacts["03_documents"] = clean_documents(artifacts["02_sources"], self.research)
         artifacts["04_facts"] = extract_facts(artifacts["03_documents"], self.model)
         artifacts["05_knowledge"] = deduplicate_facts(artifacts["04_facts"], self.model)
