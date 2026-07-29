@@ -17,8 +17,8 @@ class ResilientWikipediaResearchBackend:
         self,
         max_attempts: int = 5,
         base_delay: float = 1.0,
-        max_results_per_query: int = 1,
-        max_document_chars: int = 3000,
+        max_results_per_query: int = 3,
+        max_document_chars: int = 2400,
     ):
         if max_attempts < 1:
             raise ValueError("max_attempts must be at least 1")
@@ -56,7 +56,7 @@ class ResilientWikipediaResearchBackend:
         request = urllib.request.Request(
             f"{self.api}?{query}",
             headers={
-                "User-Agent": "youtube-no-face/0.1 (https://github.com/aNoobFrevr/youtube_no_face)",
+                "User-Agent": "youtube-no-face/0.2 (https://github.com/aNoobFrevr/youtube_no_face)",
                 "Accept": "application/json",
             },
         )
@@ -83,6 +83,7 @@ class ResilientWikipediaResearchBackend:
                 "list": "search",
                 "srsearch": query,
                 "srlimit": bounded_limit,
+                "srprop": "snippet",
                 "format": "json",
                 "utf8": 1,
                 "maxlag": 5,
@@ -93,6 +94,7 @@ class ResilientWikipediaResearchBackend:
                 "title": item["title"],
                 "url": "https://en.wikipedia.org/wiki/"
                 + urllib.parse.quote(item["title"].replace(" ", "_")),
+                "snippet": item.get("snippet", ""),
             }
             for item in payload["query"]["search"]
         ]
