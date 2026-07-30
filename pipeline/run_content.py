@@ -4,9 +4,17 @@ import argparse
 import json
 from pathlib import Path
 
+import pipeline.content_pipeline as content_pipeline
 from pipeline.content_pipeline import ContentPipeline, GitHubModelsClient
 from pipeline.context import RunContext
 from pipeline.research import ResilientWikipediaResearchBackend
+from pipeline.robust_retrieval import retrieve_sources_evidence_first
+
+
+# ContentPipeline currently resolves retrieve_sources from its module globals.
+# Install the evidence-first implementation here so the production runner uses
+# it while the public pipeline API remains backward compatible.
+content_pipeline.retrieve_sources = retrieve_sources_evidence_first
 
 
 def parse_args() -> argparse.Namespace:
