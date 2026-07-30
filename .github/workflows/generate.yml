@@ -1,5 +1,6 @@
 name: Generate researched short
 
+# Retrieval refactor verification trigger.
 on:
   push:
     branches:
