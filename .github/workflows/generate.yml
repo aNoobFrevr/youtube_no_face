@@ -1,6 +1,9 @@
 name: Generate short
 
 on:
+  push:
+    branches:
+      - agent/eight-stage-research-pipeline
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -26,12 +29,12 @@ permissions:
 
 concurrency:
   group: faceless-pipeline-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
-  test-and-generate:
+  deterministic-tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
 
     steps:
       - name: Checkout
@@ -45,30 +48,61 @@ jobs:
       - name: Run deterministic tests
         run: python -m unittest discover -s tests -v
 
+  research-smoke-test:
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: deterministic-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Run researched content pipeline
-        if: github.event_name == 'workflow_dispatch'
         id: pipeline
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_MODELS_MODEL: ${{ inputs.model }}
-          INPUT_TOPIC: ${{ inputs.topic }}
-          INPUT_FROM_STAGE: ${{ inputs.from_stage }}
+          GITHUB_MODELS_MODEL: ${{ inputs.model || 'openai/gpt-4.1' }}
+          INPUT_TOPIC: ${{ inputs.topic || 'Why is gravity different in different places' }}
+          INPUT_FROM_STAGE: ${{ inputs.from_stage || '1' }}
         run: |
           set -euo pipefail
-          OUTPUT="$(python -m pipeline.run \
-            --topic "$INPUT_TOPIC" \
-            --from-stage "${INPUT_FROM_STAGE:-1}")"
-          printf '%s\n' "$OUTPUT"
-          RUN_ID="$(printf '%s\n' "$OUTPUT" | sed -n 's/^RUN_ID=//p' | tail -n 1)"
-          test -n "$RUN_ID"
-          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          mkdir -p diagnostics
+          {
+            printf 'event=%s\n' "${{ github.event_name }}"
+            printf 'sha=%s\n' "${{ github.sha }}"
+            printf 'topic=%s\n' "$INPUT_TOPIC"
+            printf 'from_stage=%s\n' "$INPUT_FROM_STAGE"
+            printf 'model=%s\n' "$GITHUB_MODELS_MODEL"
+          } > diagnostics/run-context.txt
 
-      - name: Upload run artifact
-        if: always() && github.event_name == 'workflow_dispatch'
+          set +e
+          python -m pipeline.run \
+            --topic "$INPUT_TOPIC" \
+            --from-stage "$INPUT_FROM_STAGE" \
+            2>&1 | tee diagnostics/pipeline.log
+          status=${PIPESTATUS[0]}
+          set -e
+
+          RUN_ID="$(sed -n 's/^RUN_ID=//p' diagnostics/pipeline.log | tail -n 1)"
+          if [ -n "$RUN_ID" ]; then
+            echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          fi
+          exit "$status"
+
+      - name: Upload pipeline diagnostics
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: short-${{ steps.pipeline.outputs.run_id || github.run_id }}
-          path: runs/
+          name: pipeline-${{ steps.pipeline.outputs.run_id || github.run_id }}
+          path: |
+            runs/
+            diagnostics/
           if-no-files-found: warn
           retention-days: 7
