@@ -87,16 +87,27 @@ def plan_queries(topic: str, model: JsonModel) -> dict[str, Any]:
     return result
 
 
-def retrieve_sources(queries: dict[str, Any], backend: ResearchBackend, model: JsonModel, per_query: int = 3, threshold: int = 65) -> dict[str, Any]:
-    candidates: list[dict[str, Any]] = []
-    candidate_id = 1
-    for query_index, query in enumerate(queries["queries"], start=1):
-        for result in backend.search(query, limit=per_query):
-            candidates.append({"candidate_id": f"C{candidate_id}", "query_id": f"Q{query_index}", "query": query, **result})
-            candidate_id += 1
-    if not candidates:
-        raise ValueError("research returned no source candidates")
+def _canonical_url(url: str) -> str:
+    parsed = urllib.parse.urlsplit(url.strip())
+    query = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    query = [(key, value) for key, value in query if not key.lower().startswith("utm_") and key.lower() not in {"gclid", "fbclid"}]
+    path = parsed.path.rstrip("/") or "/"
+    return urllib.parse.urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), path, urllib.parse.urlencode(query), ""))
 
+
+def _query_variants(query: str, topic: str) -> list[str]:
+    variants = [query, f"{query} explanation", f"{query} {topic}"]
+    seen: set[str] = set()
+    result: list[str] = []
+    for variant in variants:
+        normalised = _normalise(variant)
+        if normalised and normalised not in seen:
+            seen.add(normalised)
+            result.append(variant)
+    return result
+
+
+def _score_candidates(topic: str, candidates: list[dict[str, Any]], model: JsonModel, *, using_excerpts: bool = False) -> dict[str, dict[str, Any]]:
     score_schema = _schema(
         {
             "candidate_id": {"type": "string"},
@@ -106,25 +117,115 @@ def retrieve_sources(queries: dict[str, Any], backend: ResearchBackend, model: J
         ["candidate_id", "score", "reason"],
     )
     schema = _schema({"rankings": {"type": "array", "minItems": 1, "items": score_schema}}, ["rankings"])
+    evidence = "title, snippet, and fetched excerpt" if using_excerpts else "title and snippet"
     ranking = model.complete_json(
-        "Score each candidate for direct semantic relevance to its assigned query. Penalize tangential, fictional, ambiguous, or wrong-domain pages. Do not reward a page merely because it shares a keyword.",
-        json.dumps({"topic": queries["topic"], "candidates": candidates}),
+        f"Score each candidate for direct semantic relevance to its assigned query using its {evidence}. Penalize tangential, fictional, ambiguous, or wrong-domain pages. Do not reward a page merely because it shares a keyword.",
+        json.dumps({"topic": topic, "candidates": candidates}),
         schema,
     )
-    scores = {item["candidate_id"]: item for item in ranking["rankings"]}
-    selected: list[dict[str, Any]] = []
+    return {item["candidate_id"]: item for item in ranking["rankings"]}
+
+
+def retrieve_sources(queries: dict[str, Any], backend: ResearchBackend, model: JsonModel, per_query: int = 3, threshold: int = 65) -> dict[str, Any]:
+    candidates: list[dict[str, Any]] = []
+    seen_urls: set[tuple[str, str]] = set()
+    candidate_id = 1
+
+    def add_results(query_id: str, query: str, search_query: str) -> None:
+        nonlocal candidate_id
+        for result in backend.search(search_query, limit=per_query):
+            url = result.get("url", "").strip()
+            if not url:
+                continue
+            canonical = _canonical_url(url)
+            dedupe_key = (query_id, canonical)
+            if dedupe_key in seen_urls:
+                continue
+            seen_urls.add(dedupe_key)
+            candidates.append({
+                "candidate_id": f"C{candidate_id}",
+                "query_id": query_id,
+                "query": query,
+                "search_query": search_query,
+                **result,
+                "url": canonical,
+            })
+            candidate_id += 1
+
     for query_index, query in enumerate(queries["queries"], start=1):
-        group = [c for c in candidates if c["query_id"] == f"Q{query_index}" and c["candidate_id"] in scores]
+        add_results(f"Q{query_index}", query, query)
+    if not candidates:
+        raise ValueError("research returned no source candidates")
+
+    scores = _score_candidates(queries["topic"], candidates, model)
+    selected: list[dict[str, Any]] = []
+    diagnostics: list[dict[str, Any]] = []
+
+    for query_index, query in enumerate(queries["queries"], start=1):
+        query_id = f"Q{query_index}"
+        group = [c for c in candidates if c["query_id"] == query_id and c["candidate_id"] in scores]
         group.sort(key=lambda c: scores[c["candidate_id"]]["score"], reverse=True)
-        if not group or scores[group[0]["candidate_id"]]["score"] < threshold:
-            raise ValueError(f"no sufficiently relevant source for query: {query}")
+        initial_top_score = scores[group[0]["candidate_id"]]["score"] if group else None
+        fallback_used = not group or initial_top_score < threshold
+
+        if fallback_used:
+            for variant in _query_variants(query, queries["topic"])[1:]:
+                add_results(query_id, query, variant)
+            group = [c for c in candidates if c["query_id"] == query_id]
+            rerank_candidates: list[dict[str, Any]] = []
+            for candidate in group:
+                excerpt = ""
+                fetch_error = ""
+                try:
+                    excerpt = re.sub(r"\s+", " ", html.unescape(backend.fetch(candidate["url"]))).strip()[:1200]
+                except Exception as exc:  # A single inaccessible page must not abort candidate evaluation.
+                    fetch_error = f"{type(exc).__name__}: {exc}"
+                rerank_candidates.append({**candidate, "excerpt": excerpt, "fetch_error": fetch_error})
+            scores.update(_score_candidates(queries["topic"], rerank_candidates, model, using_excerpts=True))
+            group = [c for c in group if c["candidate_id"] in scores]
+            group.sort(key=lambda c: scores[c["candidate_id"]]["score"], reverse=True)
+
+        top_score = scores[group[0]["candidate_id"]]["score"] if group else None
+        diagnostics.append({
+            "query_id": query_id,
+            "query": query,
+            "fallback_used": fallback_used,
+            "initial_top_score": initial_top_score,
+            "final_top_score": top_score,
+            "candidate_scores": [
+                {
+                    "candidate_id": candidate["candidate_id"],
+                    "title": candidate.get("title", ""),
+                    "url": candidate.get("url", ""),
+                    "score": scores[candidate["candidate_id"]]["score"],
+                    "reason": scores[candidate["candidate_id"]]["reason"],
+                }
+                for candidate in group
+            ],
+        })
+        if not group or top_score is None or top_score < threshold:
+            details = ", ".join(f"{item['score']}:{item['title']}" for item in diagnostics[-1]["candidate_scores"][:5]) or "no scored candidates"
+            raise ValueError(f"no sufficiently relevant source for query: {query}; threshold={threshold}; candidates={details}")
+
         best = group[0]
         selected.append({
-            "query_id": best["query_id"], "query": query, "title": best["title"], "url": best["url"],
+            "query_id": best["query_id"],
+            "query": query,
+            "title": best["title"],
+            "url": best["url"],
             "relevance_score": scores[best["candidate_id"]]["score"],
             "relevance_reason": scores[best["candidate_id"]]["reason"],
+            "retrieval_fallback_used": fallback_used,
         })
-    return {"topic": queries["topic"], "required_concepts": queries["required_concepts"], "sources": selected, "candidates_considered": len(candidates)}
+
+    return {
+        "topic": queries["topic"],
+        "required_concepts": queries["required_concepts"],
+        "sources": selected,
+        "candidates_considered": len(candidates),
+        "relevance_threshold": threshold,
+        "diagnostics": diagnostics,
+    }
 
 
 def clean_documents(sources: dict[str, Any], backend: ResearchBackend, max_chars: int = 2400) -> dict[str, Any]:
