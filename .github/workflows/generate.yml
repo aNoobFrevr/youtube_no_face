@@ -1,4 +1,4 @@
-name: Generate short
+name: Generate researched short
 
 on:
   push:
@@ -11,11 +11,6 @@ on:
       topic:
         description: Video topic
         required: true
-        type: string
-      from_stage:
-        description: First stage to run
-        required: false
-        default: "1"
         type: string
       model:
         description: GitHub Models catalog ID
@@ -63,14 +58,13 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Run researched content pipeline
+      - name: Run eight-stage research pipeline
         id: pipeline
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_MODELS_MODEL: ${{ inputs.model || 'openai/gpt-4.1' }}
           INPUT_TOPIC: ${{ inputs.topic || 'Why is gravity different in different places' }}
-          INPUT_FROM_STAGE: ${{ inputs.from_stage || '1' }}
         run: |
           set -euo pipefail
           mkdir -p diagnostics
@@ -78,14 +72,12 @@ jobs:
             printf 'event=%s\n' "${{ github.event_name }}"
             printf 'sha=%s\n' "${{ github.sha }}"
             printf 'topic=%s\n' "$INPUT_TOPIC"
-            printf 'from_stage=%s\n' "$INPUT_FROM_STAGE"
             printf 'model=%s\n' "$GITHUB_MODELS_MODEL"
           } > diagnostics/run-context.txt
 
           set +e
-          python -m pipeline.run \
+          python -m pipeline.run_content \
             --topic "$INPUT_TOPIC" \
-            --from-stage "$INPUT_FROM_STAGE" \
             2>&1 | tee diagnostics/pipeline.log
           status=${PIPESTATUS[0]}
           set -e
@@ -96,7 +88,26 @@ jobs:
           fi
           exit "$status"
 
-      - name: Upload pipeline diagnostics
+      - name: Verify eight stage artifacts
+        if: steps.pipeline.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN_ID="${{ steps.pipeline.outputs.run_id }}"
+          test -n "$RUN_ID"
+          for artifact in \
+            01_queries.json \
+            02_sources.json \
+            03_documents.json \
+            04_facts.json \
+            05_knowledge.json \
+            06_plan.json \
+            07_script.json \
+            08_validation.json; do
+            test -s "runs/$RUN_ID/$artifact"
+          done
+
+      - name: Upload pipeline artifacts and diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -104,5 +115,5 @@ jobs:
           path: |
             runs/
             diagnostics/
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 7
